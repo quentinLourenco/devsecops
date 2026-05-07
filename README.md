@@ -1,6 +1,6 @@
 # 🚀 WordPress + Monitoring Stack avec Pipeline de Sécurité Trivy
 
-[![Security Scan](https://github.com/YOUR_ORG/YOUR_REPO/actions/workflows/pipeline.yml/badge.svg)](https://github.com/YOUR_ORG/YOUR_REPO/actions/workflows/pipeline.yml)
+[![Security Scan](https://github.com/quentinLourenco/devsecops/actions/workflows/pipeline.yml/badge.svg)](https://github.com/quentinLourenco/devsecops/actions/workflows/pipeline.yml)
 
 Stack complète WordPress + monitoring (Prometheus/Grafana) avec pipeline CI/CD intégrant
 un scan de sécurité Trivy, génération de rapports HTML et intégration GitHub Security Center.
