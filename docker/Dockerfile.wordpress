@@ -1,0 +1,17 @@
+FROM wordpress:6.4-php8.2-apache
+
+LABEL maintainer="your-team@example.com"
+LABEL org.opencontainers.image.description="WordPress hardened image"
+
+# Sécurisation : désactiver les fonctions PHP dangereuses
+RUN echo "disable_functions = exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source" \
+    >> /usr/local/etc/php/conf.d/security.ini
+
+# Mise à jour des paquets (réduction surface d'attaque Trivy)
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
+# Permissions strictes
+RUN find /var/www/html -type d -exec chmod 755 {} \; 2>/dev/null || true \
+    && find /var/www/html -type f -exec chmod 644 {} \; 2>/dev/null || true
+
+EXPOSE 80

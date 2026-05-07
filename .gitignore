@@ -1,0 +1,4 @@
+.env
+*.sarif
+trivy-*.json
+security-report.html

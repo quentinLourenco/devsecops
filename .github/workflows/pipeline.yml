@@ -1,0 +1,245 @@
+name: 🚀 Deploy & Security Scan
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 2 * * 1'   # Scan hebdomadaire le lundi à 2h
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_WP: ${{ github.repository }}/wordpress
+  IMAGE_PROMETHEUS: ${{ github.repository }}/prometheus
+  IMAGE_GRAFANA: ${{ github.repository }}/grafana
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1 — Build & Deploy Stack
+  # ─────────────────────────────────────────────
+  deploy-stack:
+    name: 🏗️ Build & Deploy Stack
+    runs-on: ubuntu-latest
+    outputs:
+      wp_image: ${{ steps.meta-wp.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (WordPress)
+        id: meta-wp
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_WP }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build WordPress image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile.wordpress
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-wp.outputs.tags }}
+          labels: ${{ steps.meta-wp.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy monitoring stack
+        run: |
+          echo "✅ Stack WordPress + Monitoring déployée"
+          docker compose -f docker-compose.yml config --quiet
+        env:
+          WORDPRESS_DB_PASSWORD: ${{ secrets.WORDPRESS_DB_PASSWORD }}
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          MYSQL_ROOT_PASSWORD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+
+  # ─────────────────────────────────────────────
+  # JOB 2 — Trivy Scan (images + filesystem)
+  # ─────────────────────────────────────────────
+  trivy-scan:
+    name: 🔍 Trivy Security Scan
+    runs-on: ubuntu-latest
+    needs: deploy-stack
+    permissions:
+      contents: read
+      security-events: write   # nécessaire pour upload SARIF
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Scan 1 : filesystem du repo ──────────────────
+      - name: Trivy — filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-fs-results.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0   # ne pas bloquer le pipeline ici
+
+      # ── Scan 2 : image WordPress officielle ──────────
+      - name: Trivy — WordPress image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: wordpress:latest
+          format: json
+          output: trivy-wp-results.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0
+
+      # ── Scan 3 : image MySQL ──────────────────────────
+      - name: Trivy — MySQL image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: mysql:8.0
+          format: json
+          output: trivy-mysql-results.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0
+
+      # ── Scan 4 : image Prometheus ─────────────────────
+      - name: Trivy — Prometheus image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: prom/prometheus:latest
+          format: json
+          output: trivy-prometheus-results.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0
+
+      # ── Scan 5 : image Grafana ────────────────────────
+      - name: Trivy — Grafana image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: grafana/grafana:latest
+          format: json
+          output: trivy-grafana-results.json
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: 0
+
+      - name: Upload scan results as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-raw-results
+          path: trivy-*.json
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # JOB 3 — Rapport de vulnérabilités HTML
+  # ─────────────────────────────────────────────
+  trivy-report:
+    name: 📊 Generate Vulnerability Report
+    runs-on: ubuntu-latest
+    needs: trivy-scan
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-raw-results
+          path: ./scan-results
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install jinja2
+
+      - name: Generate HTML report
+        run: |
+          python scripts/generate-report.py \
+            --results-dir ./scan-results \
+            --output ./security-report.html \
+            --commit "${{ github.sha }}" \
+            --branch "${{ github.ref_name }}" \
+            --run-id "${{ github.run_id }}"
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report-html
+          path: security-report.html
+          retention-days: 90
+
+      - name: Generate report summary
+        run: |
+          python scripts/generate-report.py \
+            --results-dir ./scan-results \
+            --summary-only \
+            --commit "${{ github.sha }}"
+
+      - name: Post summary to job
+        run: |
+          python scripts/summary-to-github.py \
+            --results-dir ./scan-results >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────
+  # JOB 4 — Upload SARIF vers GitHub Security
+  # ─────────────────────────────────────────────
+  upload-sarif:
+    name: 🛡️ Upload to GitHub Security
+    runs-on: ubuntu-latest
+    needs: trivy-scan
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-raw-results
+          path: ./scan-results
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Convert JSON results to SARIF
+        run: |
+          python scripts/json-to-sarif.py \
+            --results-dir ./scan-results \
+            --output trivy-combined.sarif
+
+      # Upload SARIF → GitHub Security tab (Code Scanning)
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-combined.sarif
+          category: trivy-vulnerability-scan
+        continue-on-error: true  # pas bloquant si repo sans Advanced Security
+
+      - name: Upload SARIF artifact (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarif-report
+          path: trivy-combined.sarif
+          retention-days: 30
